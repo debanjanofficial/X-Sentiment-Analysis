@@ -1,5 +1,6 @@
 import pandas as pd
-from torch.utils.data import Dataset
+import torch
+from torch.utils.data import Dataset, DataLoader
 
 class TwitterDataset(Dataset):
     def __init__(self, tweets, labels=None, tokenizer=None, max_length=128):
@@ -14,34 +15,43 @@ class TwitterDataset(Dataset):
     def __getitem__(self, idx):
         tweet = self.tweets[idx]
         encoding = self.tokenizer(tweet, truncation=True, padding='max_length', max_length=self.max_length, return_tensors='pt')
-        item = {key: val.squeeze(0) for key, val in encoding.items()}
+        item = {'input_ids': encoding['input_ids'].squeeze(),
+            'attention_mask': encoding['attention_mask'].squeeze()}
         if self.labels is not None:
-            item['labels'] = self.labels[idx]
+            item['labels'] = torch.tensor(self.labels[idx], dtype=torch.long)
         return item
 
-def load_data(train_path, test_path=None, pos_words_path=None, neg_words_path=None):
-    # Load training data
-    train_df = pd.read_csv(train_path, header=None, names=['tweet_id', 'sentiment', 'tweet'])
-    # Remove header if present
-    if train_df.iloc[0]['tweet_id'] == 'tweet_id': # Fixed indexing error
-        train_df = train_df.iloc[1:]
-    train_df['sentiment'] = train_df['sentiment'].astype(int)
+def load_data(csv_path, tokenizer=None, max_length=128, batch_size=16, has_labels=True):
+    # Read CSV without headers
+    df = pd.read_csv(csv_path, header=None)
     
-    # Load test data
-    test_df = None
-    if test_path:
-        test_df = pd.read_csv(test_path, header=None, names=['tweet_id', 'tweet'])
-        if test_df.iloc[0]['tweet_id'] == 'tweet_id': # Fixed indexing error
-            test_df = test_df.iloc[1:]
+    if has_labels:
+        # Format: tweet_id, sentiment, tweet
+        tweet_ids = df.iloc[:, 0].tolist()
+        sentiments = df.iloc[:, 1].tolist()
+        tweets = df.iloc[:, 2].tolist()
+        
+        dataset = TwitterDataset(tweets, sentiments, tokenizer, max_length)
+    else:
+        # Format: tweet_id, tweet
+        tweet_ids = df.iloc[:, 0].tolist()
+        tweets = df.iloc[:, 1].tolist()
+        
+        dataset = TwitterDataset(tweets, None, tokenizer, max_length)
     
-    # Load positive and negative words
-    pos_words = []
-    neg_words = []
-    if pos_words_path:
-        with open(pos_words_path, 'r') as f:
-            pos_words = [line.strip() for line in f if line.strip() and not line.startswith(';')]
-    if neg_words_path:
-        with open(neg_words_path, 'r') as f:
-            neg_words = [line.strip() for line in f if line.strip() and not line.startswith(';')]
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=has_labels  # Only shuffle for training
+    )
     
-    return train_df, test_df, pos_words, neg_words
+    return dataloader, tweet_ids
+
+def load_word_lists(positive_path, negative_path):
+    with open(positive_path, 'r', encoding='utf-8') as f:
+        positive_words = set(line.strip() for line in f if line.strip() and not line.startswith(';'))
+    
+    with open(negative_path, 'r', encoding='utf-8') as f:
+        negative_words = set(line.strip() for line in f if line.strip() and not line.startswith(';'))
+    
+    return positive_words, negative_words

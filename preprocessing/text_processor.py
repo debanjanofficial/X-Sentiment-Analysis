@@ -1,32 +1,54 @@
 import re
 import nltk
+from nltk.tokenize import word_tokenize
+
+# Download necessary NLTK resources
+try:
+    nltk.data.find('tokenizers/punkt')
+except LookupError:
+    nltk.download('punkt')
 
 class TextProcessor:
-    def __init__(self, pos_words=None, neg_words=None):
-        self.pos_words = set(pos_words) if pos_words else set()
-        self.neg_words = set(neg_words) if neg_words else set()
-        # Download required NLTK resources
-        try:
-            nltk.data.find('tokenizers/punkt')
-        except LookupError:
-            nltk.download('punkt')
+    
+    def __init__(self, positive_words=None, negative_words=None):
+        self.positive_words = positive_words if positive_words else set()
+        self.negative_words = negative_words if negative_words else set()
     
     def preprocess_text(self, text):
+        """Clean and preprocess tweet text."""
+        # Convert to lowercase
         text = text.lower()
-        text = re.sub(r'http\S+', '', text)  # Remove URLs
-        text = re.sub(r'@\w+', '', text)    # Remove mentions
-        text = re.sub(r'[^a-zA-Z\s]', '', text)  # Remove special characters
-        tokens = nltk.word_tokenize(text)
-        # Join tokens back into text
-        return ' '.join(tokens)
+        
+        # Remove URLs
+        text = re.sub(r'http\S+', '', text)
+        
+        # Remove user mentions
+        text = re.sub(r'@\w+', '', text)
+        
+        # Remove hashtags
+        text = re.sub(r'#\w+', '', text)
+        
+        # Remove non-alphanumeric characters
+        text = re.sub(r'[^A-Za-z0-9\s]', '', text)
+        
+        # Remove extra whitespace
+        text = re.sub(r'\s+', ' ', text).strip()
+        
+        return text
     
-    def extract_features(self, text):
-        tokens = text.split()
-        pos_count = sum(1 for word in tokens if word in self.pos_words)
-        neg_count = sum(1 for word in tokens if word in self.neg_words)
-        sentiment_score = pos_count - neg_count
+    def extract_lexicon_features(self, text):
+        # Tokenize text
+        tokens = word_tokenize(text.lower())
+        
+        # Count positive and negative words
+        positive_count = sum(1 for token in tokens if token in self.positive_words)
+        negative_count = sum(1 for token in tokens if token in self.negative_words)
+        
+        # Calculate sentiment score
+        lexicon_score = (positive_count - negative_count) / max(len(tokens), 1)
+        
         return {
-            'pos_count': pos_count, 
-            'neg_count': neg_count,
-            'sentiment_score': sentiment_score
+            'positive_count': positive_count,
+            'negative_count': negative_count,
+            'lexicon_score': lexicon_score
         }

@@ -1,96 +1,158 @@
+import os
 import torch
-from transformers import AutoModelForSequenceClassification, AutoTokenizer, AdamW
-from torch.utils.data import DataLoader
-from tqdm import tqdm
 import numpy as np
+from tqdm import tqdm
+from transformers import AutoModelForSequenceClassification, AutoTokenizer, AdamW, get_linear_schedule_with_warmup
+from models.base_model import BaseModel
 
-class HuggingFaceModel:
-    def __init__(self, model_name, num_labels=2, device=None):
-        # Set up device - use MPS if available for M1 Pro
-        if device is None:
-            if torch.backends.mps.is_available():
-                self.device = torch.device("mps")
-                print(f"Using MPS acceleration for {model_name}")
-            else:
-                self.device = torch.device("cpu")
-                print(f"MPS not available, using CPU for {model_name}")
-        else:
-            self.device = device
-            
-        # Load tokenizer and model
+class HuggingFaceModel(BaseModel):
+    """Hugging Face model for sentiment analysis."""
+    
+    def __init__(self, model_name, num_labels=2, use_mps=True):
         self.model_name = model_name
+        self.num_labels = num_labels
+        
+        # Set device (MPS for M1 Pro)
+        if use_mps and torch.backends.mps.is_available() and torch.backends.mps.is_built():
+            self.device = torch.device("mps")
+            print(f"Using MPS device for {model_name}")
+        else:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            print(f"Using {self.device} device for {model_name}")
+        
+        # Load tokenizer and model
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForSequenceClassification.from_pretrained(
             model_name, num_labels=num_labels
-        ).to(self.device)
+        )
+        self.model.to(self.device)
     
-    def train(self, train_loader, val_loader=None, epochs=5, learning_rate=2e-5):
-        # Set model to training mode
-        self.model.train()
-        
-        # Set up optimizer
+    def train(self, train_dataloader, val_dataloader=None, epochs=3, learning_rate=2e-5):
+        """Train the model."""
+        # Set up optimizer and scheduler
         optimizer = AdamW(self.model.parameters(), lr=learning_rate)
+        total_steps = len(train_dataloader) * epochs
+        scheduler = get_linear_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=0,
+            num_training_steps=total_steps
+        )
+        
+        # Training history
+        history = {
+            'train_loss': [],
+            'val_loss': [],
+            'val_accuracy': []
+        }
         
         # Training loop
         for epoch in range(epochs):
-            total_loss = 0
-            progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
+            print(f"\nEpoch {epoch+1}/{epochs}")
             
+            # Training
+            self.model.train()
+            train_loss = 0
+            
+            progress_bar = tqdm(train_dataloader, desc="Training")
             for batch in progress_bar:
                 # Move batch to device
-                batch = {k: v.to(self.device) for k, v in batch.items()}
+                input_ids = batch['input_ids'].to(self.device)
+                attention_mask = batch['attention_mask'].to(self.device)
+                labels = batch['labels'].to(self.device)
                 
                 # Forward pass
-                outputs = self.model(**batch)
+                self.model.zero_grad()
+                outputs = self.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=labels
+                )
                 loss = outputs.loss
+                train_loss += loss.item()
                 
                 # Backward pass
-                optimizer.zero_grad()
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                 optimizer.step()
+                scheduler.step()
                 
-                total_loss += loss.item()
-                progress_bar.set_postfix({"loss": loss.item()})
+                # Update progress bar
+                progress_bar.set_postfix({'loss': loss.item()})
             
-            avg_loss = total_loss / len(train_loader)
-            print(f"Epoch {epoch+1}: Average loss = {avg_loss:.4f}")
+            avg_train_loss = train_loss / len(train_dataloader)
+            history['train_loss'].append(avg_train_loss)
+            print(f"Average training loss: {avg_train_loss:.4f}")
             
             # Validation
-            if val_loader:
-                val_accuracy = self.evaluate(val_loader)
+            if val_dataloader:
+                val_loss, val_accuracy = self._evaluate(val_dataloader)
+                history['val_loss'].append(val_loss)
+                history['val_accuracy'].append(val_accuracy)
+                print(f"Validation loss: {val_loss:.4f}")
                 print(f"Validation accuracy: {val_accuracy:.4f}")
         
-        return self
+        return history
     
-    def evaluate(self, data_loader):
+    def _evaluate(self, dataloader):
+        """Evaluate the model on validation data."""
         self.model.eval()
+        val_loss = 0
         correct = 0
         total = 0
         
         with torch.no_grad():
-            for batch in data_loader:
-                batch = {k: v.to(self.device) for k, v in batch.items()}
-                outputs = self.model(**batch)
-                predictions = torch.argmax(outputs.logits, dim=-1)
-                correct += (predictions == batch["labels"]).sum().item()
-                total += batch["labels"].size(0)
+            for batch in dataloader:
+                # Move batch to device
+                input_ids = batch['input_ids'].to(self.device)
+                attention_mask = batch['attention_mask'].to(self.device)
+                labels = batch['labels'].to(self.device)
                 
-        return correct / total
+                # Forward pass
+                outputs = self.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=labels
+                )
+                loss = outputs.loss
+                val_loss += loss.item()
+                
+                # Calculate accuracy
+                logits = outputs.logits
+                predictions = torch.argmax(logits, dim=1)
+                correct += (predictions == labels).sum().item()
+                total += labels.size(0)
+        
+        avg_val_loss = val_loss / len(dataloader)
+        accuracy = correct / total
+        
+        return avg_val_loss, accuracy
     
-    def predict(self, test_loader):
+    def predict(self, dataloader):
+        """Make predictions on test data."""
         self.model.eval()
         all_predictions = []
         all_probabilities = []
         
         with torch.no_grad():
-            for batch in test_loader:
-                batch = {k: v.to(self.device) for k, v in batch.items() if k != 'tweet_id'}
-                outputs = self.model(**batch)
-                probs = torch.nn.functional.softmax(outputs.logits, dim=-1)
-                predictions = torch.argmax(probs, dim=-1)
+            for batch in tqdm(dataloader, desc=f"Predicting with {self.model_name}"):
+                # Move batch to device
+                input_ids = batch['input_ids'].to(self.device)
+                attention_mask = batch['attention_mask'].to(self.device)
                 
+                # Forward pass
+                outputs = self.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask
+                )
+                logits = outputs.logits
+                
+                # Get predictions and probabilities
+                probabilities = torch.softmax(logits, dim=1)
+                predictions = torch.argmax(logits, dim=1)
+                
+                # Move to CPU and convert to numpy
                 all_predictions.extend(predictions.cpu().numpy())
-                all_probabilities.extend(probs.cpu().numpy())
+                all_probabilities.extend(probabilities.cpu().numpy())
         
         return {
             'predictions': np.array(all_predictions),
@@ -98,8 +160,15 @@ class HuggingFaceModel:
         }
     
     def save(self, path):
-        torch.save(self.model.state_dict(), path)
-        
+        """Save the model."""
+        os.makedirs(path, exist_ok=True)
+        self.model.save_pretrained(path)
+        self.tokenizer.save_pretrained(path)
+        print(f"Model saved to {path}")
+    
     def load(self, path):
-        self.model.load_state_dict(torch.load(path, map_location=self.device))
-        return self
+        """Load the model."""
+        self.model = AutoModelForSequenceClassification.from_pretrained(path, num_labels=self.num_labels)
+        self.tokenizer = AutoTokenizer.from_pretrained(path)
+        self.model.to(self.device)
+        print(f"Model loaded from {path}")
