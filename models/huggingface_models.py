@@ -2,7 +2,8 @@ import os
 import torch
 import numpy as np
 from tqdm import tqdm
-from transformers import AutoModelForSequenceClassification, AutoTokenizer, AdamW, get_linear_schedule_with_warmup
+from transformers import AutoModelForSequenceClassification, AutoTokenizer, get_linear_schedule_with_warmup
+from torch.optim import AdamW
 from models.base_model import BaseModel
 
 class HuggingFaceModel(BaseModel):
@@ -23,7 +24,7 @@ class HuggingFaceModel(BaseModel):
         # Load tokenizer and model
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForSequenceClassification.from_pretrained(
-            model_name, num_labels=num_labels
+            model_name, num_labels=num_labels, ignore_mismatched_sizes=True
         )
         self.model.to(self.device)
     
